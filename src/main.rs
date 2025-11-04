@@ -70,12 +70,22 @@ async fn main() -> Result<()> {
                     "hyper_util::client::legacy::connect::http=info"
                         .parse()
                         .expect("Failed to parse RUST_LOG directive"),
+                )
+                .add_directive(
+                    "reqwest::connect=info"
+                        .parse()
+                        .expect("Failed to parse RUST_LOG directive"),
+                )
+                .add_directive(
+                    "hyper_util::client::legacy::connect::http=info"
+                        .parse()
+                        .expect("Failed to parse RUST_LOG directive"),
                 ),
         )
         .with(
             fmt::layer()
                 .without_time()
-                .with_target(false)
+                .with_target(true)
                 .with_thread_ids(false)
                 .with_level(true),
         )
