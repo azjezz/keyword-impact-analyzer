@@ -25,4 +25,4 @@ cargo run --release -- --keyword scope --skip-download
 
 ## Output
 
-Results are saved in `results/` directory with one file per keyword analysis.
+Results for 10000-15000 range are saved in `results/` directory with one file per keyword analysis.

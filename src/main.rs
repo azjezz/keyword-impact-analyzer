@@ -9,7 +9,7 @@ use clap::Parser;
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
-use analyzer::{AnalysisTargetKeyword, analyze_directory};
+use analyzer::analyze_directory;
 
 #[derive(Parser)]
 #[command(name = "php-syntax-analyzer")]
@@ -17,8 +17,12 @@ use analyzer::{AnalysisTargetKeyword, analyze_directory};
 #[command(about = "Analyze PHP packages for keyword usage to assess impact of making keywords reserved", long_about = None)]
 struct Cli {
     /// Target keyword to analyze (let, scope, or using)
-    #[arg(short, long, value_parser = parse_keyword)]
-    keyword: AnalysisTargetKeyword,
+    #[arg(
+        short,
+        long,
+        help = "Target keyword to analyze (e.g, let, scope, or using)"
+    )]
+    keywords: Vec<String>,
 
     /// Minimum package index (0-based, inclusive)
     #[arg(long, default_value_t = 100)]
@@ -35,21 +39,13 @@ struct Cli {
     /// Skip downloading packages (analyze existing sources only)
     #[arg(long, default_value_t = false)]
     skip_download: bool,
+
+    /// Display found issues
+    #[arg(long, default_value_t = false)]
+    display: bool,
 }
 
-fn parse_keyword(s: &str) -> Result<AnalysisTargetKeyword, String> {
-    match s.to_lowercase().as_str() {
-        "let" => Ok(AnalysisTargetKeyword::Let),
-        "scope" => Ok(AnalysisTargetKeyword::Scope),
-        "using" => Ok(AnalysisTargetKeyword::Using),
-        _ => Err(format!(
-            "Invalid keyword '{}'. Must be one of: let, scope, using",
-            s
-        )),
-    }
-}
-
-#[tokio::main(flavor = "multi_thread", worker_threads = 12)]
+#[tokio::main]
 async fn main() -> Result<()> {
     // Initialize tracing
     tracing_subscriber::registry()
@@ -93,6 +89,14 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    if cli.keywords.is_empty() {
+        anyhow::bail!("At least one keyword must be specified using --keywords");
+    }
+
+    if cli.min >= cli.max {
+        anyhow::bail!("Minimum index must be less than maximum index");
+    }
+
     let start_time = Instant::now();
 
     // Download and extract packages
@@ -131,12 +135,7 @@ async fn main() -> Result<()> {
         );
     }
 
-    tracing::info!(
-        "Analyzing PHP source code for keyword: {}",
-        cli.keyword.as_str()
-    );
-
-    analyze_directory(cli.directory, sources_dir, cli.keyword)
+    analyze_directory(cli.directory, sources_dir, cli.keywords, cli.display)
         .context("Failed to analyze directory")?;
 
     let analysis_duration = analysis_start.elapsed();

@@ -25,11 +25,12 @@ use mago_syntax::walker::Walker;
 pub fn analyze_directory(
     donwload_directory: PathBuf,
     sources_directory: PathBuf,
-    target: AnalysisTargetKeyword,
+    keywords: Vec<String>,
+    display: bool,
 ) -> Result<(), DatabaseError> {
     tracing::info!(
-        "Starting analysis for keyword '{}' in directory {:?}",
-        target.as_str(),
+        "Starting analysis for keywords '{:?}' in directory {:?}",
+        keywords,
         donwload_directory
     );
 
@@ -43,64 +44,58 @@ pub fn analyze_directory(
     let database = loader.load()?;
     let files = database.files().collect::<Vec<_>>();
 
-    tracing::info!("Analyzing {} files...", files.len());
+    for keyword in keywords {
+        tracing::info!("Analyzing {} files for keyword '{keyword}'...", files.len());
 
-    let issues: IssueCollection = files
-        .into_par_iter()
-        .map_init(Bump::new, |arena, file| Analyzer::run(arena, &file, target))
-        .reduce(IssueCollection::new, |mut acc, coll| {
-            acc.extend(coll);
-            acc
-        });
+        let issues: IssueCollection = files
+            .par_iter()
+            .map_init(Bump::new, |arena, file| {
+                Analyzer::run(arena, file, keyword.as_str())
+            })
+            .reduce(IssueCollection::new, |mut acc, coll| {
+                acc.extend(coll);
+                acc
+            });
 
-    let reporter = Reporter::new(
-        database.read_only(),
-        ReportingTarget::Stdout,
-        ColorChoice::Always,
-        false,
-        None,
-    );
+        let issue_count = issues.len();
+        if issue_count == 0 {
+            tracing::info!("No issues found for keyword '{keyword}'.");
+            continue;
+        }
 
-    reporter
-        .report(issues, ReportingFormat::Rich)
-        .expect("Failed to report issues");
+        tracing::info!("Analysis complete for keyword '{keyword}'. Found {issue_count} issues.");
+        if !display {
+            continue;
+        }
+
+        let reporter = Reporter::new(
+            database.read_only(),
+            ReportingTarget::Stdout,
+            ColorChoice::Always,
+            false,
+            None,
+        );
+
+        reporter
+            .report(issues, ReportingFormat::Rich)
+            .expect("Failed to report issues");
+    }
 
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AnalysisTargetKeyword {
-    Let,
-    Scope,
-    Using,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Analyzer<'ctx> {
+    keyword: &'ctx str,
 }
 
-impl AnalysisTargetKeyword {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            AnalysisTargetKeyword::Let => "let",
-            AnalysisTargetKeyword::Scope => "scope",
-            AnalysisTargetKeyword::Using => "using",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Analyzer {
-    target_keyword: AnalysisTargetKeyword,
-}
-
-impl Analyzer {
-    pub fn run<'arena, 'ctx>(
-        arena: &'arena Bump,
-        file: &'ctx File,
-        target_keyword: AnalysisTargetKeyword,
-    ) -> IssueCollection {
+impl<'ctx> Analyzer<'ctx> {
+    pub fn run<'arena>(arena: &'arena Bump, file: &File, keyword: &'ctx str) -> IssueCollection {
         let (program, _) = parse_file(arena, file);
 
         let resolved_names = NameResolver::new(arena).resolve(program);
         let mut ctx = AnalysisContext::new(arena, file, program, resolved_names);
-        let analyzer = Analyzer { target_keyword };
+        let analyzer = Analyzer { keyword };
         analyzer.walk_program(program, &mut ctx);
         ctx.collector.finish()
     }
@@ -125,7 +120,7 @@ impl<'ctx, 'arena> AnalysisContext<'ctx, 'arena> {
     }
 }
 
-impl<'ctx, 'ast, 'arena> Walker<'ast, 'arena, AnalysisContext<'ctx, 'arena>> for Analyzer {
+impl<'ctx, 'ast, 'arena> Walker<'ast, 'arena, AnalysisContext<'ctx, 'arena>> for Analyzer<'ctx> {
     fn walk_in_function_call(
         &self,
         function_call: &'ast FunctionCall<'arena>,
@@ -138,7 +133,7 @@ impl<'ctx, 'ast, 'arena> Walker<'ast, 'arena, AnalysisContext<'ctx, 'arena>> for
         let resolved_name = ctx.resolved_names.get(identifier);
 
         let last_segment = resolved_name.split('\\').last().unwrap_or_default();
-        if !last_segment.eq_ignore_ascii_case(self.target_keyword.as_str()) {
+        if !last_segment.eq_ignore_ascii_case(&self.keyword) {
             return;
         }
 
@@ -147,6 +142,55 @@ impl<'ctx, 'ast, 'arena> Walker<'ast, 'arena, AnalysisContext<'ctx, 'arena>> for
                 Annotation::primary(identifier.span())
                     .with_message(format!("Call to function `{resolved_name}` found here")),
             ),
+        );
+    }
+
+    fn walk_in_function_closure_creation(
+        &self,
+        function_closure_creation: &'ast FunctionClosureCreation<'arena>,
+        context: &mut AnalysisContext<'ctx, 'arena>,
+    ) {
+        let Expression::Identifier(identifier) = function_closure_creation.function else {
+            return;
+        };
+
+        let resolved_name = context.resolved_names.get(identifier);
+        let last_segment = resolved_name.split('\\').last().unwrap_or_default();
+        if !last_segment.eq_ignore_ascii_case(self.keyword) {
+            return;
+        }
+
+        context.collector.report(
+            Issue::error("Found usage of target keyword").with_annotation(
+                Annotation::primary(identifier.span()).with_message(format!(
+                    "Function closure creation for `{resolved_name}` found here"
+                )),
+            ),
+        );
+    }
+
+    fn walk_in_function(
+        &self,
+        function: &'ast Function<'arena>,
+        context: &mut AnalysisContext<'ctx, 'arena>,
+    ) {
+        let name = &function.name.value;
+        if !name.eq_ignore_ascii_case(self.keyword) {
+            return;
+        }
+
+        let fqn = context.resolved_names.get(&function.name);
+
+        context.collector.report(
+            Issue::error("Found usage of target keyword")
+                .with_annotation(
+                    Annotation::primary(function.name.span())
+                        .with_message(format!("Function `{name}` found here")),
+                )
+                .with_annotation(
+                    Annotation::secondary(function.span())
+                        .with_message(format!("Function `{fqn}` defined here")),
+                ),
         );
     }
 }
