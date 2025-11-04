@@ -1,7 +1,7 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::fs;
 use std::io;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use futures::stream::{self, StreamExt};
@@ -9,7 +9,7 @@ use reqwest::Client;
 use serde::Deserialize;
 
 const PACKAGIST_PER_PAGE: usize = 15;
-const MAX_CONCURRENT_DOWNLOADS: usize = 5;
+const MAX_CONCURRENT_DOWNLOADS: usize = 100;
 
 #[derive(Debug, Deserialize)]
 struct PackageListResponse {
@@ -42,7 +42,11 @@ async fn get_top_packages(client: &Client, min: usize, max: usize) -> Result<Vec
     let mut page = (min / PACKAGIST_PER_PAGE) + 1;
     let mut collected = 0;
 
-    tracing::info!("Fetching top packages from Packagist (min: {}, max: {})", min, max);
+    tracing::info!(
+        "Fetching top packages from Packagist (min: {}, max: {})",
+        min,
+        max
+    );
 
     loop {
         let url = format!("https://packagist.org/explore/popular.json?page={}", page);
@@ -117,13 +121,14 @@ async fn download_and_extract_package(
     }
 
     // Pick version: just pick the last version in the array
-    let version_info = versions
-        .last()
-        .context("No suitable version found")?;
+    let version_info = versions.last().context("No suitable version found")?;
 
     tracing::debug!("Selected version for {}", package_name);
 
-    let dist = version_info.dist.as_ref().context("No dist information available")?;
+    let dist = version_info
+        .dist
+        .as_ref()
+        .context("No dist information available")?;
 
     // Create directory structure
     let zipball_dir = target_dir.join("zipballs").join(&package_name_lower);
@@ -177,7 +182,9 @@ fn extract_zip(zip_path: &Path, extract_to: &Path) -> Result<()> {
 
     // Extract all files
     for i in 0..archive.len() {
-        let mut file = archive.by_index(i).context("Failed to get file from archive")?;
+        let mut file = archive
+            .by_index(i)
+            .context("Failed to get file from archive")?;
         let outpath = temp_dir.join(file.name());
 
         if file.is_dir() {
@@ -211,12 +218,15 @@ fn extract_zip(zip_path: &Path, extract_to: &Path) -> Result<()> {
 }
 
 /// Downloads and extracts packages from Packagist
-pub async fn download_and_extract_packages(target_dir: PathBuf, min: usize, max: usize) -> Result<usize> {
+pub async fn download_and_extract_packages(
+    target_dir: PathBuf,
+    min: usize,
+    max: usize,
+) -> Result<usize> {
     // Create necessary directories
     fs::create_dir_all(target_dir.join("zipballs"))
         .context("Failed to create zipballs directory")?;
-    fs::create_dir_all(target_dir.join("sources"))
-        .context("Failed to create sources directory")?;
+    fs::create_dir_all(target_dir.join("sources")).context("Failed to create sources directory")?;
 
     let client = Client::builder()
         .user_agent("php-syntax-analyzer/0.1.0")
